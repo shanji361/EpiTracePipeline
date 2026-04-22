@@ -1,11 +1,4 @@
-# this script reproduces Fig 6c,d,e,f,g,h,i,j from the EpiTrace paper + a rebalancing experiment 
-
-# in the rebalancing experiment, EC/Peric. has only 31 cells but the cap is 350, 
-# leaving an ~11x imbalance against the smallest major type. 
-# Possible change is to lower the cap substantially (closer to 31–50) or explicitly exclude this cell type and note it.
-
-# Sys.setenv(XML_CONFIG = "/share/pkg.8/libxml2/2.15.1/install/bin/xml2-config")
-# pak::pkg_install('MagpiePKU/EpiTrace')
+# this script reproduces Fig 6c,d,e,f,g,h,i,j from the EpiTrace paper + cell type rebalancing tests at line 439
 
 
 library(Signac)
@@ -432,10 +425,11 @@ ratio <- max(ct_df$n) / min(ct_df$n)
 print(ct_df, row.names = FALSE)
 message(sprintf("Gini  : %.3f  (flag if > 0.4)", gini))
 message(sprintf("Ratio : %.1fx (flag if > 5x)",  ratio))
-# ======  added abovve code to check for imbalance data =========
+# ======  added above code to check for imbalance data =========
 
 rownames(epitrace_obj_age_estimated_multiome@meta.data) <- as.character(epitrace_obj_age_estimated_multiome$cell)
 
+# CELL TYPE BALANCING FUNC
 epitrace_balanced <- resample_cells(
   epitrace_obj_age_estimated_multiome,
   alpha = 0.4,
