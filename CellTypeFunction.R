@@ -1,10 +1,6 @@
-# ============================================================================
-# EpiTrace Cell-Type Rebalancing — Unified Three-Regime Perturbation Operator
-#
-# Purpose : Controlled perturbation of class distributions to measure
-#           EpiTrace robustness — NOT biological correction.
-#
-# Regimes :
+# EpiTrace Cell-Type Rebalancing 
+# SEE USAGE IN REBALANCE PIPELINE SCRIPT in line 439
+
 #   "down"  — Regime A  Pure downsampling. Majority classes lose cells.
 #                        Rare classes are untouched. Total N shrinks.
 #   "mixed" — Regime B  Convergence toward a geometric mean target.
@@ -19,10 +15,9 @@
 #   target_c = f(n_c, alpha, mode)
 #   alpha in [0, 1] — strength of perturbation. Above 0.4 is extreme.
 #   alpha = 0 always returns the original distribution regardless of mode
-# ============================================================================
 
 
-# ── Internal utilities ───────────────────────────────────────────────────────
+# ── these functions tell you what happened (Internal) ───────────────────────────────────────────────────────
 
 .gini <- function(counts) {
   v <- sort(counts[counts > 0])
@@ -53,8 +48,6 @@
   print(summary_df, row.names = FALSE)
 }
 
-
-# ── Target-size calculators, one per regime ──────────────────────────────────
 
 # Regime A — Downsampling only
 # target_c = n_c^(1-alpha) * n_min^alpha
