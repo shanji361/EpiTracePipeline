@@ -17,7 +17,7 @@
 #
 # Core formula :
 #   target_c = f(n_c, alpha, mode)
-#   alpha in [0, 1] — strength of perturbation
+#   alpha in [0, 1] — strength of perturbation. Above 0.4 is extreme.
 #   alpha = 0 always returns the original distribution regardless of mode
 # ============================================================================
 
