@@ -1,5 +1,5 @@
 # EpiTrace Cell-Type Rebalancing 
-# SEE FUNC USAGE IN REBALANCE.R SCRIPT in line 432
+# SEE FUNC USAGE in NewRebalance.R in line 432
 
 #   "down"  — Regime A  Pure downsampling. Majority classes lose cells.
 #                        Rare classes are untouched. Total N shrinks.
