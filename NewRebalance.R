@@ -1,4 +1,4 @@
-# this script reproduces Fig 6c,d,e,f,g,h,i,j from the EpiTrace paper + cell type rebalancing tests at line 439
+# this script reproduces Fig 6c,d,e,f,g,h,i,j from the EpiTrace paper + cell type rebalancing tests at line 432
 
 
 library(Signac)
