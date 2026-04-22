@@ -438,7 +438,7 @@ rownames(epitrace_obj_age_estimated_multiome@meta.data) <- as.character(epitrace
 
 epitrace_balanced <- resample_cells(
   epitrace_obj_age_estimated_multiome,
-  alpha = 0.7,
+  alpha = 0.4,
   mode  = "down"
 )
 
