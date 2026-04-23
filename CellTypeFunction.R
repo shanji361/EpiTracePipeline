@@ -19,6 +19,10 @@
 #   target_c = f(n_c, alpha, mode)
 #   alpha in [0, 1] — strength of perturbation
 #   alpha = 0 always returns the original distribution regardless of mode
+#
+# new_to_orig convention (used throughout):
+#   names(new_to_orig) = new barcode (unique, used as Seurat cell name)
+#   unname(new_to_orig) = original barcode (used to slice assay matrices)
 # ============================================================================
 
 
@@ -43,7 +47,7 @@
   message(sprintf(
     "\n── resample_cells  alpha=%.2f  mode='%s'  seed=%d ──",
     alpha, mode, seed))
-  message(sprintf("  Total cells : %d → %d",
+  message(sprintf("  Total cells : %d -> %d",
                   sum(n_c), sum(targets)))
   message(sprintf("  Gini  before: %.3f   after: %.3f",
                   .gini(n_c), .gini(targets)))
@@ -56,88 +60,28 @@
 
 # ── Target-size calculators, one per regime ──────────────────────────────────
 
-# Regime A — Downsampling only
-# target_c = n_c^(1-alpha) * n_min^alpha
-# alpha=0 → target_c = n_c  (no change)
-# alpha=1 → target_c = n_min for all (everything floored to the rarest)
 .targets_down <- function(n_c, alpha) {
   n_min   <- min(n_c)
   targets <- round(n_c^(1 - alpha) * n_min^alpha)
-  pmin(targets, n_c)    # strict downsampling: never exceed original
+  pmin(targets, n_c)
 }
 
-# Regime B — Mixed (convergence to geometric mean)
-# G = geometric mean of all class sizes
-# target_c = n_c^(1-alpha) * G^alpha
-# alpha=0 → target_c = n_c
-# alpha=1 → target_c = G for all classes
-# Classes above G shrink; classes below G grow (capped at cap_multiplier * n_min)
 .targets_mixed <- function(n_c, alpha, cap_multiplier = 3) {
   G       <- exp(mean(log(n_c)))
   targets <- round(n_c^(1 - alpha) * G^alpha)
   cap     <- round(min(n_c) * cap_multiplier)
-  # Upsampled classes are capped; downsampled classes keep their computed value
   ifelse(targets > n_c, pmin(targets, cap), targets)
 }
 
-# Regime C — Full upsampling (stress test)
-# target_c = n_c^(1-alpha) * n_max^alpha
-# alpha=0 → target_c = n_c
-# alpha=1 → target_c = n_max for all (inflate everything to largest class)
 .targets_up <- function(n_c, alpha) {
   n_max   <- max(n_c)
   targets <- round(n_c^(1 - alpha) * n_max^alpha)
-  pmax(targets, n_c)    # strict upsampling: never shrink
+  pmax(targets, n_c)
 }
 
 
 # ── Main function ─────────────────────────────────────────────────────────────
 
-#' Resample a Seurat object under a chosen imbalance regime
-#'
-#' @param seurat_obj      A Seurat object with cell-type labels.
-#' @param alpha           Perturbation strength in [0, 1].
-#'                        0 = no change (identity); 1 = maximum perturbation.
-#' @param mode            Sampling regime:
-#'                        "down"  — Regime A, pure downsampling (default).
-#'                        "mixed" — Regime B, mild upsample + mild downsample.
-#'                        "up"    — Regime C, full upsampling / duplication.
-#' @param celltype_col    Metadata column holding cell-type labels
-#'                        (default: "celltype").
-#' @param cap_multiplier  Only used when mode="mixed". Maximum fold-increase
-#'                        allowed for rare classes relative to n_min (default: 3).
-#' @param seed            Integer random seed (default: 1234).
-#' @param verbose         Print per-class summary (default: TRUE).
-#'
-#' @return A Seurat object tagged with metadata columns:
-#'         resample_alpha  — alpha value used
-#'         resample_mode   — mode used ("down", "mixed", or "up")
-#'         original_cell   — source barcode (tracks duplicated cells)
-#'
-#' @details
-#'   Regime A ("down") samples WITHOUT replacement only.
-#'   Regimes B ("mixed") and C ("up") keep all original cells once, then
-#'   fill the gap to the target by sampling WITH replacement. Duplicated
-#'   cells receive suffixed barcodes (_dup1, _dup2, ...) so Seurat cell
-#'   names remain unique. Reductions are NOT transferred for objects with
-#'   duplicated cells since duplicates have no unique embedding.
-#'
-#' @examples
-#'   # Regime A — remove cells from large classes
-#'   obj_down  <- resample_cells(epitrace_obj, alpha = 0.7, mode = "down")
-#'
-#'   # Regime B — converge toward geometric mean
-#'   obj_mixed <- resample_cells(epitrace_obj, alpha = 0.5, mode = "mixed")
-#'
-#'   # Regime C — inflate rare classes to stress-test EpiTrace
-#'   obj_up    <- resample_cells(epitrace_obj, alpha = 1.0, mode = "up")
-#'
-#'   # Drop-in replacement for the old cap=350 block:
-#'   epitrace_balanced <- resample_cells(
-#'     epitrace_obj_age_estimated_multiome,
-#'     alpha = 0.7,
-#'     mode  = "down"
-#'   )
 resample_cells <- function(seurat_obj,
                            alpha          = 0.5,
                            mode           = c("down", "mixed", "up"),
@@ -171,6 +115,9 @@ resample_cells <- function(seurat_obj,
   )
   names(targets) <- classes
   
+  # new_to_orig: names = new unique barcode, values = original source barcode
+  # For unmodified cells both are identical.
+  # For duplicates: name = "BARCODE_dup1", value = "BARCODE"
   new_to_orig <- character(0)
   
   for (ct in classes) {
@@ -178,30 +125,53 @@ resample_cells <- function(seurat_obj,
     tgt  <- targets[ct]
     
     if (tgt <= length(pool)) {
+      # Downsampling — no duplication, names and values are the same barcode
       drawn       <- sample(pool, size = tgt, replace = FALSE)
       new_to_orig <- c(new_to_orig, setNames(drawn, drawn))
+      
     } else {
-      gap         <- tgt - length(pool)
-      extra       <- sample(pool, size = gap, replace = TRUE)
-      dup_counter <- integer(0)
-      extra_new   <- character(gap)
+      # Upsampling — keep every original cell, then add duplicates
+      gap   <- tgt - length(pool)
+      extra <- sample(pool, size = gap, replace = TRUE)
+      
+      # FIX 1: dup_counter is a plain list — no rlang %||% needed.
+      # FIX 2: counter starts at 1L directly; avoids 0L + 1L arithmetic
+      #         that produced NA when the list lookup returned NULL.
+      dup_counter <- list()
+      extra_new   <- character(gap)  # new unique barcodes for duplicates
+      extra_orig  <- character(gap)  # corresponding original barcodes
+      
       for (j in seq_len(gap)) {
-        src            <- extra[j]
-        dup_counter[src] <- (dup_counter[src] %||% 0L) + 1L
-        extra_new[j]   <- sprintf("%s_dup%d", src, dup_counter[src])
+        src  <- extra[j]
+        cnt  <- dup_counter[[src]]
+        cnt  <- if (is.null(cnt) || is.na(cnt)) 1L else cnt + 1L
+        dup_counter[[src]] <- cnt
+        extra_new[j]  <- sprintf("%s_dup%d", src, cnt)  # new unique name
+        extra_orig[j] <- src                              # original source
       }
+      
+      # FIX 3: setNames(value, name) — value must be the original barcode
+      #         so the matrix slicer can find it; name must be the new unique
+      #         barcode so Seurat rownames stay unique.
+      #         Old code had these backwards: setNames(extra, extra_new)
+      #         which put the original barcodes as names and new as values,
+      #         causing the matrix slice to use _dupN as a column index
+      #         (which doesn't exist) and rownames to get the original
+      #         barcode (causing duplicates).
       new_to_orig <- c(new_to_orig,
-                       setNames(pool,  pool),
-                       setNames(extra, extra_new))
+                       setNames(pool,       pool),       # identity
+                       setNames(extra_orig, extra_new))  # value=orig, name=new
     }
   }
   
-  # ── Fast path: mode="down", no duplicates — subset keeps ALL assays ─────────
-  needs_dup <- any(duplicated(unname(new_to_orig)))
+  # ── Fast path: mode="down", no duplicates ────────────────────────────────
+  # subset() propagates ALL assays atomically — RNA and ATAC are guaranteed
+  # to cover the same balanced cell set.
+  needs_dup <- any(duplicated(names(new_to_orig)))
   
   if (!needs_dup) {
-    result_obj <- subset(seurat_obj, cells = unname(new_to_orig))
-    result_obj$original_cell  <- unname(new_to_orig)[
+    result_obj <- subset(seurat_obj, cells = names(new_to_orig))
+    result_obj$original_cell  <- names(new_to_orig)[
       match(rownames(result_obj@meta.data), names(new_to_orig))]
     result_obj$resample_alpha <- alpha
     result_obj$resample_mode  <- mode
@@ -209,22 +179,26 @@ resample_cells <- function(seurat_obj,
     return(result_obj)
   }
   
-  # ── Slow path: mode="mixed" or "up", duplicated cells ───────────────────────
-  orig_unique <- unique(unname(new_to_orig))
+  # ── Slow path: mode="mixed" or "up", duplicated cells ───────────────────
+  # Both ATAC and RNA are sliced with the same new_to_orig vector so the
+  # two modalities cover exactly the same balanced cell set.
+  
+  orig_unique <- unique(unname(new_to_orig))       # original barcodes needed
   base_obj    <- subset(seurat_obj, cells = orig_unique)
   
-  orig_meta           <- base_obj@meta.data
-  new_meta            <- orig_meta[new_to_orig, , drop = FALSE]
-  rownames(new_meta)  <- names(new_to_orig)
+  # Build metadata for the new (possibly duplicated) cell set.
+  # Index orig_meta by unname(new_to_orig) (original barcodes) to get the
+  # right row for each new cell, then rename rows to names(new_to_orig).
+  orig_meta          <- base_obj@meta.data
+  new_meta           <- orig_meta[unname(new_to_orig), , drop = FALSE]
+  rownames(new_meta) <- names(new_to_orig)         # unique new barcodes
   new_meta$original_cell  <- unname(new_to_orig)
   new_meta$resample_alpha <- alpha
   new_meta$resample_mode  <- mode
   
+  # Transfer assays — skip any that have no counts layer (e.g. chromvar)
   assay_names <- Seurat::Assays(base_obj)
   
-  # FIX: skip assays that have no counts layer (e.g. chromvar stores only
-  # a 'data' layer; trying GetAssayData(..., layer="counts") on it returns
-  # an empty matrix and CreateAssayObject() then errors.
   has_counts <- vapply(assay_names, function(an) {
     mtx <- tryCatch(
       Seurat::GetAssayData(base_obj, assay = an, layer = "counts"),
@@ -236,14 +210,17 @@ resample_cells <- function(seurat_obj,
   assay_names_ok <- assay_names[has_counts]
   
   if (any(!has_counts)) {
-    message("  Note: skipping assays with no counts layer (will not be ",
-            "transferred): ", paste(assay_names[!has_counts], collapse = ", "))
+    message("  Note: skipping assays with no counts layer (not transferred): ",
+            paste(assay_names[!has_counts], collapse = ", "))
   }
   
+  # Slice every valid assay using unname(new_to_orig) as column indices
+  # (original barcodes), then rename columns to names(new_to_orig) (new
+  # unique barcodes). RNA and ATAC get identical column sets — aligned.
   new_assay_list <- lapply(assay_names_ok, function(an) {
     mtx     <- Seurat::GetAssayData(base_obj, assay = an, layer = "counts")
-    new_mtx <- mtx[, new_to_orig, drop = FALSE]
-    colnames(new_mtx) <- names(new_to_orig)
+    new_mtx <- mtx[, unname(new_to_orig), drop = FALSE]  # slice by orig barcode
+    colnames(new_mtx) <- names(new_to_orig)               # rename to new barcode
     Seurat::CreateAssayObject(counts = new_mtx,
                               min.cells = 0, min.features = 0,
                               check.matrix = FALSE)
