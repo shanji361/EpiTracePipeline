@@ -1,6 +1,10 @@
-# EpiTrace Cell-Type Rebalancing 
-# SEE FUNC USAGE in NewRebalance.R in line 432
-
+# ============================================================================
+# EpiTrace Cell-Type Rebalancing — Unified Three-Regime Perturbation Operator
+#
+# Purpose : Controlled perturbation of class distributions to measure
+#           EpiTrace robustness — NOT biological correction.
+#
+# Regimes :
 #   "down"  — Regime A  Pure downsampling. Majority classes lose cells.
 #                        Rare classes are untouched. Total N shrinks.
 #   "mixed" — Regime B  Convergence toward a geometric mean target.
@@ -13,11 +17,12 @@
 #
 # Core formula :
 #   target_c = f(n_c, alpha, mode)
-#   alpha in [0, 1] — strength of perturbation. Above 0.4 is extreme.
+#   alpha in [0, 1] — strength of perturbation
 #   alpha = 0 always returns the original distribution regardless of mode
+# ============================================================================
 
 
-# ── these functions tell you what happened (Internal) ───────────────────────────────────────────────────────
+# ── Internal utilities ───────────────────────────────────────────────────────
 
 .gini <- function(counts) {
   v <- sort(counts[counts > 0])
@@ -48,6 +53,8 @@
   print(summary_df, row.names = FALSE)
 }
 
+
+# ── Target-size calculators, one per regime ──────────────────────────────────
 
 # Regime A — Downsampling only
 # target_c = n_c^(1-alpha) * n_min^alpha
@@ -131,7 +138,6 @@
 #'     alpha = 0.7,
 #'     mode  = "down"
 #'   )
-
 resample_cells <- function(seurat_obj,
                            alpha          = 0.5,
                            mode           = c("down", "mixed", "up"),
@@ -140,7 +146,6 @@ resample_cells <- function(seurat_obj,
                            seed           = 1234,
                            verbose        = TRUE) {
   
-  # ── 0. Validate ───────────────────────────────────────────────────────────
   mode <- match.arg(mode)
   stopifnot(
     is.numeric(alpha), length(alpha) == 1, alpha >= 0, alpha <= 1,
@@ -154,13 +159,11 @@ resample_cells <- function(seurat_obj,
   celltypes <- as.character(meta[[celltype_col]])
   all_bcs   <- rownames(meta)
   
-  # ── 1. Class counts ───────────────────────────────────────────────────────
-  ct_tab <- table(celltypes)
+  ct_tab  <- table(celltypes)
   classes <- names(ct_tab)
-  n_c    <- as.integer(ct_tab)
+  n_c     <- as.integer(ct_tab)
   names(n_c) <- classes
   
-  # ── 2. Per-class target sizes ─────────────────────────────────────────────
   targets <- switch(mode,
                     down  = .targets_down(n_c, alpha),
                     mixed = .targets_mixed(n_c, alpha, cap_multiplier),
@@ -168,71 +171,76 @@ resample_cells <- function(seurat_obj,
   )
   names(targets) <- classes
   
-  # ── 3. Sample per class, building new_bc → orig_bc map ───────────────────
-  new_to_orig <- character(0)   # names = new barcodes, values = original barcodes
+  new_to_orig <- character(0)
   
   for (ct in classes) {
     pool <- all_bcs[celltypes == ct]
     tgt  <- targets[ct]
     
     if (tgt <= length(pool)) {
-      # Downsample (no replacement)
-      drawn <- sample(pool, size = tgt, replace = FALSE)
+      drawn       <- sample(pool, size = tgt, replace = FALSE)
       new_to_orig <- c(new_to_orig, setNames(drawn, drawn))
-      
     } else {
-      # Upsample: keep all originals, then fill gap with replacement
-      gap   <- tgt - length(pool)
-      extra <- sample(pool, size = gap, replace = TRUE)
-      
-      # Assign unique suffixed barcodes to duplicates
+      gap         <- tgt - length(pool)
+      extra       <- sample(pool, size = gap, replace = TRUE)
       dup_counter <- integer(0)
       extra_new   <- character(gap)
       for (j in seq_len(gap)) {
-        src <- extra[j]
+        src            <- extra[j]
         dup_counter[src] <- (dup_counter[src] %||% 0L) + 1L
-        extra_new[j]     <- sprintf("%s_dup%d", src, dup_counter[src])
+        extra_new[j]   <- sprintf("%s_dup%d", src, dup_counter[src])
       }
-      
       new_to_orig <- c(new_to_orig,
                        setNames(pool,  pool),
                        setNames(extra, extra_new))
     }
   }
   
-  # ── 4. Fast path — no duplicates (mode = "down") ─────────────────────────
+  # ── Fast path: mode="down", no duplicates — subset keeps ALL assays ─────────
   needs_dup <- any(duplicated(unname(new_to_orig)))
   
   if (!needs_dup) {
     result_obj <- subset(seurat_obj, cells = unname(new_to_orig))
-    result_obj$original_cell  <- as.character(result_obj[[celltype_col, drop = TRUE]])
-    # overwrite with actual barcode
     result_obj$original_cell  <- unname(new_to_orig)[
       match(rownames(result_obj@meta.data), names(new_to_orig))]
     result_obj$resample_alpha <- alpha
     result_obj$resample_mode  <- mode
-    
     if (verbose) .print_summary(alpha, mode, n_c, targets, classes, seed)
     return(result_obj)
   }
   
-  # ── 5. Slow path — duplicated cells (modes "mixed" / "up") ───────────────
-  
-  # Subset to unique original barcodes
+  # ── Slow path: mode="mixed" or "up", duplicated cells ───────────────────────
   orig_unique <- unique(unname(new_to_orig))
   base_obj    <- subset(seurat_obj, cells = orig_unique)
   
-  # Replicate meta.data rows
-  orig_meta <- base_obj@meta.data
-  new_meta  <- orig_meta[new_to_orig, , drop = FALSE]
-  rownames(new_meta) <- names(new_to_orig)
+  orig_meta           <- base_obj@meta.data
+  new_meta            <- orig_meta[new_to_orig, , drop = FALSE]
+  rownames(new_meta)  <- names(new_to_orig)
   new_meta$original_cell  <- unname(new_to_orig)
   new_meta$resample_alpha <- alpha
   new_meta$resample_mode  <- mode
   
-  # Replicate count matrices for each assay
-  assay_names    <- Seurat::Assays(base_obj)
-  new_assay_list <- lapply(assay_names, function(an) {
+  assay_names <- Seurat::Assays(base_obj)
+  
+  # FIX: skip assays that have no counts layer (e.g. chromvar stores only
+  # a 'data' layer; trying GetAssayData(..., layer="counts") on it returns
+  # an empty matrix and CreateAssayObject() then errors.
+  has_counts <- vapply(assay_names, function(an) {
+    mtx <- tryCatch(
+      Seurat::GetAssayData(base_obj, assay = an, layer = "counts"),
+      error = function(e) NULL
+    )
+    !is.null(mtx) && nrow(mtx) > 0 && ncol(mtx) > 0
+  }, logical(1))
+  
+  assay_names_ok <- assay_names[has_counts]
+  
+  if (any(!has_counts)) {
+    message("  Note: skipping assays with no counts layer (will not be ",
+            "transferred): ", paste(assay_names[!has_counts], collapse = ", "))
+  }
+  
+  new_assay_list <- lapply(assay_names_ok, function(an) {
     mtx     <- Seurat::GetAssayData(base_obj, assay = an, layer = "counts")
     new_mtx <- mtx[, new_to_orig, drop = FALSE]
     colnames(new_mtx) <- names(new_to_orig)
@@ -240,16 +248,15 @@ resample_cells <- function(seurat_obj,
                               min.cells = 0, min.features = 0,
                               check.matrix = FALSE)
   })
-  names(new_assay_list) <- assay_names
+  names(new_assay_list) <- assay_names_ok
   
-  # Build new Seurat object from the first assay, then attach the rest
   result_obj <- Seurat::CreateSeuratObject(
     counts    = Seurat::GetAssayData(new_assay_list[[1]], layer = "counts"),
     meta.data = new_meta,
     min.cells = 0, min.features = 0
   )
-  if (length(assay_names) > 1) {
-    for (an in assay_names[-1]) result_obj[[an]] <- new_assay_list[[an]]
+  if (length(assay_names_ok) > 1) {
+    for (an in assay_names_ok[-1]) result_obj[[an]] <- new_assay_list[[an]]
   }
   
   if (length(base_obj@reductions) > 0) {
