@@ -442,21 +442,17 @@ rownames(epitrace_obj_age_estimated_multiome@meta.data) <-
   as.character(epitrace_obj_age_estimated_multiome$cell)
 
 # ── Balance ATAC + RNA together ──────────────────────────────────────────────
-# CHANGE FROM ORIGINAL: resample_cells() with mode="down" runs subset() which
-# keeps all assays (both 'all' ATAC and 'rna_spliced') on the same cell set.
-# No separate mtx_balanced slice from the global initiated_mm is needed.
 
 epitrace_balanced <- resample_cells(
   epitrace_obj_age_estimated_multiome,
-  alpha = 0.4,
-  mode  = "down"
+  alpha = 0.9,
+  mode  = "mixed", 
+  cap_multiplier = 8
 )
 
 cells_keep <- epitrace_balanced$cell
 
 # ── Re-run EpiTrace on balanced ATAC ────────────────────────────────────────
-# CHANGE FROM ORIGINAL: pull from the balanced object's assay, NOT initiated_mm,
-# so ATAC and RNA are guaranteed to cover exactly the same cells.
 
 mtx_balanced <- GetAssayData(epitrace_balanced, assay = "all", layer = "counts")
 
@@ -474,14 +470,24 @@ epitrace_obj_age_balanced <- EpiTraceAge_Convergence(
 )
 
 # ── Reattach metadata + RNA assay from the balanced object ───────────────────
-# CHANGE FROM ORIGINAL: RNA assay is transferred from epitrace_balanced
-# (not reconstructed from the original object), and cytotrace is recomputed
-# below rather than borrowed.
+# Save fresh EpiTrace scores before metadata overwrite
+fresh_age_cols <- grep("EpiTraceAge|Accessibility|nCount_iterative|nFeature_iterative",
+                       colnames(epitrace_obj_age_balanced@meta.data), value = TRUE)
+fresh_ages <- epitrace_obj_age_balanced@meta.data[, fresh_age_cols, drop = FALSE]
+fresh_ages$cell <- rownames(fresh_ages)
 
+# Overwrite metadata with balanced object's metadata (celltype, clusters, etc.)
 meta_bal <- epitrace_balanced@meta.data[
   match(epitrace_obj_age_balanced$cell, epitrace_balanced$cell), ]
 rownames(meta_bal) <- meta_bal$cell
 epitrace_obj_age_balanced@meta.data <- meta_bal
+
+# Restore fresh EpiTrace scores
+for (col in fresh_age_cols) {
+  epitrace_obj_age_balanced@meta.data[[col]] <-
+    fresh_ages[[col]][match(rownames(epitrace_obj_age_balanced@meta.data),
+                            fresh_ages$cell)]
+}
 
 epitrace_obj_age_balanced[["rna_spliced"]] <- epitrace_balanced[["rna_spliced"]]
 
@@ -725,3 +731,19 @@ ct_comparison <- ct_comparison[order(-ct_comparison$n_before), ]
 print(ct_comparison, row.names = FALSE)
 message(sprintf("Total before: %d", sum(ct_comparison$n_before)))
 message(sprintf("Total after : %d", sum(ct_comparison$n_after)))
+
+# Summarise the finding cleanly for your methods/results
+message(sprintf("Cells in original run : %d", ncol(epitrace_obj_age_estimated_multiome)))
+message(sprintf("Cells in balanced run : %d", ncol(epitrace_obj_age_balanced)))
+message(sprintf("Pearson  r (original vs balanced EpiTrace age) : %.3f",
+                cor(age_compare$age_original, age_compare$age_balanced,
+                    use = "complete.obs")))
+message(sprintf("Spearman r (original vs balanced EpiTrace age) : %.3f",
+                cor(age_compare$age_original, age_compare$age_balanced,
+                    use = "complete.obs", method = "spearman")))
+
+# Check whether cell-type rank ordering is preserved even if absolute scores shift
+ct_median_orig <- tapply(age_compare$age_original, age_compare$celltype, median)
+ct_median_bal  <- tapply(age_compare$age_balanced,  age_compare$celltype, median)
+message(sprintf("Pearson r of per-cell-type median ages : %.3f",
+                cor(ct_median_orig, ct_median_bal, use = "complete.obs")))
